@@ -1,0 +1,16 @@
+services:
+  anti-clog:
+    build: .
+    container_name: printer-anti-clog
+    restart: unless-stopped
+    environment:
+      # === 必填 ===
+      - PRINTER_IP=192.168.0.228
+      # === 可选（有默认值） ===
+      - PRINTER_PORT=631
+      - PRINTER_IPP_PATH=/ipp/print
+      - SCHEDULE_FREQUENCY=every_2   # daily / every_2 / every_3 / every_5 / every_7
+      - SCHEDULE_HOUR=9
+      - SCHEDULE_MINUTE=0
+      - CUSTOM_TEXT=
+      - TZ=Asia/Shanghai

@@ -291,8 +291,8 @@ class App:
 
         def _task():
             try:
-                jpg, pdf = self.content_gen.generate("both")
-                success, msg = self.print_mgr.print_file(jpg, pdf)
+                jpg = self.content_gen.generate()
+                success, msg = self.print_mgr.print_file(jpg)
                 self.log_mgr.add(success, msg, jpg)
             except Exception as e:
                 success = False

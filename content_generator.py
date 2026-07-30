@@ -14,10 +14,17 @@ class ContentGenerator:
 
     def _load_fonts(self):
         font_paths = [
+            # macOS
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/STHeiti Light.ttc",
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
             "/Library/Fonts/Arial Unicode.ttf",
+            # Linux (Docker)
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
         for fp in font_paths:
             if os.path.exists(fp):
@@ -123,32 +130,10 @@ class ContentGenerator:
 
         return img
 
-    def generate(self, fmt="jpeg"):
-        """
-        生成测试页文件。
-        fmt: "jpeg" | "pdf" | "both"
-        返回: 单路径 (jpeg/pdf) 或 (jpeg_path, pdf_path) (both)
-        """
+    def generate(self):
+        """生成防堵头测试页 JPEG 文件，返回路径"""
         img = self._build_image()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp = tempfile.gettempdir()
-
-        if fmt == "jpeg":
-            path = os.path.join(tmp, f"printer_anti_clog_{ts}.jpg")
-            img.save(path, "JPEG", quality=92)
-            return path
-
-        elif fmt == "pdf":
-            path = os.path.join(tmp, f"printer_anti_clog_{ts}.pdf")
-            img.save(path, "PDF", resolution=200.0)
-            return path
-
-        elif fmt == "both":
-            jpg = os.path.join(tmp, f"printer_anti_clog_{ts}.jpg")
-            pdf = os.path.join(tmp, f"printer_anti_clog_{ts}.pdf")
-            img.save(jpg, "JPEG", quality=92)
-            img.save(pdf, "PDF", resolution=200.0)
-            return jpg, pdf
-
-        else:
-            return self.generate("jpeg")
+        path = os.path.join(tempfile.gettempdir(), f"printer_anti_clog_{ts}.jpg")
+        img.save(path, "JPEG", quality=92)
+        return path

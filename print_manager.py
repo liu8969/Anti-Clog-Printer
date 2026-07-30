@@ -1,4 +1,4 @@
-"""IPP 直连打印管理模块 — 每次打印用完即断，不注册永久打印机"""
+"""IPP 直连打印管理模块 — 每次打印用完即断，只用 JPEG"""
 
 import subprocess
 import os
@@ -8,7 +8,7 @@ TEMP_PRINTER_NAME = "_auto_anti_clog_temp"
 
 
 class PrintManager:
-    """通过 ipptool 直连打印机，单次 HTTP 请求，无长连接"""
+    """通过 IPP 直连打印机，CUPS 作为兜底，只用 JPEG"""
 
     def __init__(self, config):
         self._config = config
@@ -46,11 +46,11 @@ class PrintManager:
             output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
             return result.returncode == 0, output
         except FileNotFoundError:
-            return False, "错误: ipptool 命令不可用"
+            return False, "ipptool 不可用"
         except subprocess.TimeoutExpired:
-            return False, "错误: 连接打印机超时 (5s)"
+            return False, "连接超时 (5s)"
         except Exception as e:
-            return False, f"错误: {e}"
+            return False, str(e)
 
     # ------------------------------------------------------------------ #
     #  公开方法
@@ -61,96 +61,94 @@ class PrintManager:
         if not uri:
             return False, "请先填写打印机 IP 地址"
 
-        success, output = self._run_ipptool(uri, "get-printer-attributes.test")
-        if success:
-            return True, "打印机连接成功"
-
         for alt_uri in self._uri_alt_paths():
-            if alt_uri == uri:
-                continue
-            success, _ = self._run_ipptool(alt_uri, "get-printer-attributes.test")
-            if success:
-                return True, f"打印机连接成功 (路径: {alt_uri})"
+            ok, _ = self._run_ipptool(alt_uri, "get-printer-attributes.test")
+            if ok:
+                return True, f"打印机连接成功 (IPP)"
 
-        return False, output
+        return False, "无法连接打印机"
 
-    def print_file(self, jpg_path, pdf_path):
+    def print_file(self, jpg_path):
         """
-        向打印机发送文件。
-        优先 JPEG（几乎所有 IPP 打印机支持），其次 PDF，最后 CUPS 临时打印机。
-        返回 (success, message)
+        向打印机发送 JPEG 文件。
+        优先 IPP 直连，失败后 CUPS 兜底。
+        返回 (success, message) — message 中明确标注 [IPP] 或 [CUPS]。
         """
+        lines = []
+
         if not self._uri():
             return False, "请先填写打印机 IP 地址"
 
-        # 方案 A: ipptool + JPEG（兼容性最好）
-        if os.path.exists(jpg_path):
-            ok, out = self._try_ipptool_print(jpg_path)
-            if ok:
-                return True, "打印任务已发送 (IPP/JPEG)"
+        if not os.path.exists(jpg_path):
+            return False, f"文件不存在: {jpg_path}"
 
-        # 方案 B: ipptool + PDF
-        if os.path.exists(pdf_path):
-            ok, out = self._try_ipptool_print(pdf_path)
-            if ok:
-                return True, "打印任务已发送 (IPP/PDF)"
-
-        # 方案 C: CUPS 临时打印机
-        target = jpg_path if os.path.exists(jpg_path) else pdf_path
-        ok, msg = self._cups_temp_print(target)
+        # —— 首选: IPP 直连 JPEG ——
+        ok, out = self._try_ipp_print(jpg_path, lines)
         if ok:
-            return True, msg
+            return True, "\n".join(lines)
 
-        return False, f"打印失败。\nIPP: {out[:300]}\nCUPS: {msg}"
+        # —— 兜底: CUPS 临时打印机 ——
+        lines.append("--- 回退到 CUPS ---")
+        ok, msg = self._cups_print(jpg_path)
+        if ok:
+            lines.append(f"[CUPS] {msg}")
+            return True, "\n".join(lines)
 
-    def _try_ipptool_print(self, file_path):
-        """在所有已知 IPP 路径上尝试 ipptool print-job"""
-        for uri in self._uri_alt_paths():
-            ok, out = self._run_ipptool(uri, "print-job.test", input_file=file_path)
+        lines.append(f"[CUPS] 失败: {msg}")
+        return False, "\n".join(lines)
+
+    def _try_ipp_print(self, jpg_path, lines):
+        """尝试 IPP 直连所有路径"""
+        uris = self._uri_alt_paths()
+        lines.append(f"[IPP] 直连 JPEG ({len(uris)} 个路径)")
+        for i, u in enumerate(uris):
+            ok, out = self._run_ipptool(u, "print-job.test", input_file=jpg_path)
             if ok:
+                lines.append(f"[IPP] 路径 {i+1} OK → 打印成功")
                 return True, out
+            else:
+                short = out.replace("\n", " ")[:80]
+                lines.append(f"[IPP] 路径 {i+1} 失败: {short}")
         return False, out
 
     # ------------------------------------------------------------------ #
-    #  CUPS 临时打印机方案
+    #  CUPS 兜底
     # ------------------------------------------------------------------ #
 
-    def _cups_temp_print(self, file_path):
+    def _cups_print(self, jpg_path):
         uri = self._uri()
-        if not self._try_add_temp_printer(uri):
-            return False, "无法添加临时打印机 (lpadmin 失败)"
 
-        lp_result = subprocess.run(
-            ["lp", "-d", TEMP_PRINTER_NAME, "-o", "ColorModel=CMYK", file_path],
-            capture_output=True, text=True, timeout=60,
-        )
-        self._cleanup_temp_printer()
-
-        if lp_result.returncode == 0:
-            return True, "打印任务已发送 (CUPS/IPP)"
-        else:
-            msg = lp_result.stderr.strip() or lp_result.stdout.strip()
-            return False, f"lp 发送失败: {msg}"
-
-    def _try_add_temp_printer(self, uri):
-        strategies = [
+        # 添加临时打印机
+        added = False
+        for args, timeout in (
             (["lpadmin", "-p", TEMP_PRINTER_NAME, "-v", uri, "-E", "-m", "raw"], 10),
             (["lpadmin", "-p", TEMP_PRINTER_NAME, "-v", uri, "-E", "-m", "everywhere"], 25),
             (["lpadmin", "-p", TEMP_PRINTER_NAME, "-v", uri, "-E"], 10),
-        ]
-        for cmd, timeout in strategies:
+        ):
             try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=timeout,
-                )
-                if result.returncode == 0:
-                    return True
+                r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+                if r.returncode == 0:
+                    added = True
+                    break
             except (subprocess.TimeoutExpired, Exception):
                 continue
-        return False
 
-    def _cleanup_temp_printer(self):
+        if not added:
+            return False, "lpadmin 添加临时打印机失败"
+
+        # 发送打印
+        lp = subprocess.run(
+            ["lp", "-d", TEMP_PRINTER_NAME, jpg_path],
+            capture_output=True, text=True, timeout=60,
+        )
+
+        # 清理
         subprocess.run(
             ["lpadmin", "-x", TEMP_PRINTER_NAME],
             capture_output=True, text=True, timeout=10,
         )
+
+        if lp.returncode == 0:
+            return True, "打印成功"
+        else:
+            return False, lp.stderr.strip() or lp.stdout.strip()
