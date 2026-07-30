@@ -3,6 +3,8 @@ services:
     build: .
     container_name: printer-anti-clog
     restart: unless-stopped
+    ports:
+      - "18080:18080"
     environment:
       # === 必填 ===
       - PRINTER_IP=192.168.0.228
