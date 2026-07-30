@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Docker Web 管理端 — NiceGUI 4 页签界面"""
 
+import asyncio
 import os
 import sys
 import threading
@@ -177,7 +178,7 @@ with ui.row().classes("w-full items-center gap-4 mt-4"):
     ui.space()
 
     async def manual_print():
-        ok, msg = await ui.run_in_executor(app.do_print)
+        ok, msg = await asyncio.to_thread(app.do_print)
         refresh_log()
         if ok:
             ui.notify("打印成功", type="positive")
