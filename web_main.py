@@ -2,18 +2,75 @@
 """Docker Web 管理端 — NiceGUI 4 页签界面"""
 
 import asyncio
+import base64
 import os
+import secrets
 import sys
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from nicegui import app as nicegui_app
 from nicegui import ui
 from config_manager import ConfigManager
 from log_manager import LogManager
 from content_generator import ContentGenerator
 from scheduler_manager import SchedulerManager
 from ipp_client import send_print_job, test_printer_connection
+
+
+# ====================================================================== #
+#  Basic Auth 中间件（设置 WEB_PASSWORD 后启用）
+# ====================================================================== #
+
+WEB_USER = os.environ.get("WEB_USER", "admin")
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")
+
+
+class BasicAuthMiddleware:
+    """
+    纯 ASGI 中间件：保护管理界面。
+    设置环境变量 WEB_PASSWORD 后启用 Basic Auth（用户名默认 admin）。
+    仅拦截 HTTP 请求；WebSocket 与后端调度不受影响。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if not WEB_PASSWORD or scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        auth = b""
+        for k, v in scope.get("headers") or []:
+            if k == b"authorization":
+                auth = v
+                break
+
+        ok = False
+        if auth.startswith(b"Basic "):
+            try:
+                decoded = base64.b64decode(auth[6:]).decode("utf-8")
+                user, _, pwd = decoded.partition(":")
+                ok = user == WEB_USER and secrets.compare_digest(pwd, WEB_PASSWORD)
+            except Exception:
+                ok = False
+
+        if ok:
+            await self.app(scope, receive, send)
+            return
+
+        body = b'{"detail": "Unauthorized"}'
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"www-authenticate", b'Basic realm="printer-admin"'),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 
 # ====================================================================== #
@@ -27,6 +84,8 @@ class App:
         self.content_gen = ContentGenerator(self.config)
         self.scheduler = SchedulerManager(self.config, self._scheduled_print)
 
+    VALID_FREQUENCIES = ("daily", "every_2", "every_3", "every_5", "every_7")
+
     def do_print(self):
         ip = self.config.get("printer.ip", "")
         port = self.config.get("printer.port", 631)
@@ -39,7 +98,11 @@ class App:
         return ok, msg
 
     def _scheduled_print(self):
-        self.do_print()
+        try:
+            self.do_print()
+        except Exception as e:
+            # 定时打印路径的异常也要落日志，否则用户无从得知失败
+            self.log_mgr.add(False, f"异常: {e}", "")
 
     def test_conn(self):
         return test_printer_connection(
@@ -57,15 +120,66 @@ class App:
             ("content.custom_text", "CUSTOM_TEXT"),
         ]:
             v = os.environ.get(ev)
-            if v:
-                self.config.set(key, int(v) if key.endswith(("port", "hour", "minute")) else v)
+            if not v:
+                continue
+            if key.endswith(("port", "hour", "minute")):
+                try:
+                    self.config.set(key, int(v))
+                except ValueError:
+                    print(f"警告: 环境变量 {ev}={v} 不是有效整数，已忽略", flush=True)
+            else:
+                self.config.set(key, v)
 
+        # 频率合法性校验，非法值回退 daily
+        if (os.environ.get("SCHEDULE_FREQUENCY")
+                and self.config.get("schedule.frequency") not in self.VALID_FREQUENCIES):
+            print("警告: SCHEDULE_FREQUENCY 无效，回退为 daily", flush=True)
+            self.config.set("schedule.frequency", "daily")
+
+        # 显式调度开关：SCHEDULE_ENABLED=1/0 覆盖本地状态
+        if os.environ.get("SCHEDULE_ENABLED") is not None:
+            self.config.set("schedule.enabled",
+                            os.environ["SCHEDULE_ENABLED"].strip().lower()
+                            in ("1", "true", "yes", "on"))
+
+        # 省墨测试模式：TEST_MODE=1 时只打印一条细色带（验证打印链路用）
+        if os.environ.get("TEST_MODE") is not None:
+            self.config.set("content.test_mode",
+                            os.environ["TEST_MODE"].strip().lower()
+                            in ("1", "true", "yes", "on"))
+
+        # 测试页旋转补偿：TEST_ROTATE=1 时测试页预先旋转 90°
+        #（部分打印机的图像打印会把横向小图竖排，需预先反向旋转）
+        if os.environ.get("TEST_ROTATE") is not None:
+            self.config.set("content.test_rotate",
+                            os.environ["TEST_ROTATE"].strip().lower()
+                            in ("1", "true", "yes", "on"))
+
+
+# 快照"是否已有本地配置"：load_env 的 set() 会创建 config.json，须在之前判断
+_CONFIG_PATH = os.environ.get("CONFIG_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "config.json"
+)
+fresh_deploy = not os.path.exists(_CONFIG_PATH)
 
 app = App()
 app.load_env()
 
-# 无论有没有人打开网页，计划恢复运行
-if app.config.get("schedule.enabled", False):
+# ---- 调度自动恢复 ----
+# 1) SCHEDULE_ENABLED 显式设置时完全以它为准；
+# 2) 否则沿用本地 config.json 的 schedule.enabled（用户在 UI 停用后重启容器仍保持停用）；
+# 3) 首次部署（无本地配置，只配了 PRINTER_IP）默认启用，
+#    保证 24x7 防堵的核心目标开箱即用。
+if os.environ.get("SCHEDULE_ENABLED") is not None:
+    auto_start = app.config.get("schedule.enabled", False)
+elif app.config.get("schedule.enabled", False):
+    auto_start = True
+elif fresh_deploy and app.config.get("printer.ip", "").strip():
+    auto_start = True
+else:
+    auto_start = False
+
+if auto_start:
     app.scheduler.start()
 
 
@@ -137,18 +251,17 @@ with ui.tab_panels(tabs, value=t1).classes("w-full"):
             start_btn = ui.button("启动定时打印", icon="play_arrow", on_click=do_start)
             stop_btn = ui.button("停止", icon="stop", on_click=do_stop)
 
-        def refresh_buttons():
-            start_btn.set_enabled(not app.scheduler.is_running)
-            stop_btn.set_enabled(app.scheduler.is_running)
-
     # ====== Tab 3: 打印内容 ======
     with ui.tab_panel(t3).classes("p-4"):
         custom_text = ui.textarea("自定义备注文字",
                                   value=app.config.get("content.custom_text", ""))
-        ui.label("测试页包含: CMYK 四色条 / 混合色 / 渐变色 / 喷嘴网格").classes("text-grey")
+        test_mode = ui.switch("测试模式（省墨：说明文字 + 一条细色带，验证打印链路）",
+                              value=bool(app.config.get("content.test_mode", False)))
+        ui.label("完整模式测试页包含: 渐变色条 / 喷嘴网格").classes("text-grey")
         ui.button("保存内容设置", icon="save",
                   on_click=lambda: (
                       app.config.set("content.custom_text", custom_text.value),
+                      app.config.set("content.test_mode", bool(test_mode.value)),
                       ui.notify("已保存", type="positive"),
                   ))
 
@@ -216,4 +329,9 @@ refresh_log()
 #  启动
 # ====================================================================== #
 
-ui.run(host="0.0.0.0", port=18080, title="打印机自动防堵程序", show=False, reload=False)
+# 设置 WEB_PASSWORD 后启用 Basic Auth 保护管理界面
+if WEB_PASSWORD:
+    nicegui_app.add_middleware(BasicAuthMiddleware)
+
+ui.run(host="0.0.0.0", port=18080, title="打印机自动防堵程序",
+       show=False, reload=False)
