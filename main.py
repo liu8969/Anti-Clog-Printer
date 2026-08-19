@@ -212,9 +212,16 @@ class App:
         self._text_custom = tk.Text(tab, height=4, width=60)
         self._text_custom.pack(fill="x", pady=(6, 12))
 
+        self._var_test_mode = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            tab,
+            text="测试模式（省墨：说明文字 + 一条细色带，验证打印链路）",
+            variable=self._var_test_mode,
+        ).pack(anchor="w", pady=(0, 12))
+
         ttk.Label(
             tab,
-            text="测试页包含: CMYK 四色条 / 混合色条 / 渐变色条 / 喷嘴网格",
+            text="完整模式测试页包含: 渐变色条 / 喷嘴网格",
             foreground="gray",
         ).pack(anchor="w")
 
@@ -315,8 +322,8 @@ class App:
     def _scheduled_print(self):
         """计划触发时的打印回调（已在后台线程中）"""
         try:
-            jpg, pdf = self.content_gen.generate("both")
-            success, msg = self.print_mgr.print_file(jpg, pdf)
+            jpg = self.content_gen.generate()
+            success, msg = self.print_mgr.print_file(jpg)
             self.log_mgr.add(success, msg, jpg)
         except Exception as e:
             self.log_mgr.add(False, f"异常: {e}", "")
@@ -327,7 +334,7 @@ class App:
     def _safe_start_scheduler(self):
         self._sync_ui_to_config()
 
-        if not self._config.get("printer.ip", "").strip():
+        if not self.config.get("printer.ip", "").strip():
             messagebox.showwarning("提示", "请先填写打印机 IP 地址")
             return
 
@@ -390,6 +397,7 @@ class App:
 
         custom_text = self._text_custom.get("1.0", "end-1c")
         self.config.set("content.custom_text", custom_text)
+        self.config.set("content.test_mode", bool(self._var_test_mode.get()))
 
     def _load_ui_from_config(self):
         """将配置值填入 GUI 控件"""
@@ -409,6 +417,8 @@ class App:
         self._text_custom.delete("1.0", "end")
         if custom_text:
             self._text_custom.insert("1.0", custom_text)
+
+        self._var_test_mode.set(bool(self.config.get("content.test_mode", False)))
 
         self._update_uri_preview()
 

@@ -1,5 +1,6 @@
 """配置持久化管理模块"""
 
+import copy
 import json
 import os
 
@@ -17,6 +18,8 @@ DEFAULT_CONFIG = {
     },
     "content": {
         "custom_text": "",
+        "test_mode": False,  # True=省墨测试模式（只打印一条细色带）
+        "test_rotate": False,  # True=测试页预先旋转90°（补偿打印机竖排处理）
     },
 }
 
@@ -26,22 +29,30 @@ class ConfigManager:
 
     def __init__(self, config_path=None):
         if config_path is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(base_dir, "config.json")
+            # 可用环境变量 CONFIG_PATH 指定配置位置（如 Docker 挂载卷）
+            config_path = os.environ.get("CONFIG_PATH") or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "config.json"
+            )
         self._config_path = config_path
         self._config = self._load()
+
+    @property
+    def config_path(self):
+        """当前配置文件路径"""
+        return self._config_path
 
     def _load(self):
         if os.path.exists(self._config_path):
             try:
                 with open(self._config_path, "r", encoding="utf-8") as f:
                     saved = json.load(f)
-                merged = DEFAULT_CONFIG.copy()
+                # 深拷贝，避免污染模块级 DEFAULT_CONFIG
+                merged = copy.deepcopy(DEFAULT_CONFIG)
                 self._deep_merge(merged, saved)
                 return merged
             except (json.JSONDecodeError, OSError):
                 pass
-        return DEFAULT_CONFIG.copy()
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     @staticmethod
     def _deep_merge(base, override):

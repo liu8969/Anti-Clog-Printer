@@ -46,6 +46,12 @@ class DockerApp:
             self.config.set("schedule.minute", int(env["SCHEDULE_MINUTE"]))
         if env.get("CUSTOM_TEXT"):
             self.config.set("content.custom_text", env["CUSTOM_TEXT"])
+        if env.get("TEST_MODE") is not None:
+            self.config.set("content.test_mode",
+                            env["TEST_MODE"].strip().lower() in ("1", "true", "yes", "on"))
+        if env.get("TEST_ROTATE") is not None:
+            self.config.set("content.test_rotate",
+                            env["TEST_ROTATE"].strip().lower() in ("1", "true", "yes", "on"))
 
     # ------------------------------------------------------------------ #
     #  打印
@@ -62,7 +68,9 @@ class DockerApp:
 
         try:
             jpg = self.content_gen.generate()
-            success, msg = send_print_job(ip, port, path, open(jpg, "rb").read())
+            with open(jpg, "rb") as f:
+                data = f.read()
+            success, msg = send_print_job(ip, port, path, data)
             self.log_mgr.add(success, msg, jpg)
             status = "成功" if success else "失败"
             print(f"[{now}] {status}: {msg}", flush=True)
