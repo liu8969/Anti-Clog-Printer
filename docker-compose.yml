@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "18080:18080"
+    volumes:
+      # 配置与打印日志持久化到宿主机 ./data 目录（容器重建不丢失）
+      - ./data:/app/data
     environment:
       # === 必填 ===
       - PRINTER_IP=192.168.0.228
@@ -15,4 +18,16 @@ services:
       - SCHEDULE_HOUR=9
       - SCHEDULE_MINUTE=0
       - CUSTOM_TEXT=
+      # 省墨测试模式：1=只打印一条细色带（验证打印链路用，几乎不耗墨）
+      - TEST_MODE=1
+      # 测试页旋转补偿：一般无需开启（测试页已是 A4 竖向，与完整模式同方向原样打印）
+      - TEST_ROTATE=0
+      # 首次部署自动启用计划（配了 PRINTER_IP 即启动）；设为 0 可禁用
+      - SCHEDULE_ENABLED=1
+      # 配置与日志落盘位置（挂载卷内）
+      - CONFIG_PATH=/app/data/config.json
+      - LOG_PATH=/app/data/print_log.json
+      # Web 管理界面 Basic Auth（可选，设置后需登录才能访问）
+      # - WEB_USER=admin
+      # - WEB_PASSWORD=change-me
       - TZ=Asia/Shanghai
