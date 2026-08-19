@@ -2,8 +2,7 @@
 
 import threading
 import schedule
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 class SchedulerManager:
@@ -45,8 +44,11 @@ class SchedulerManager:
     def stop(self):
         self._stop_event.set()
         schedule.clear()
-        self._thread = None
         self._next_run = None
+        # 等待线程退出，避免 is_running 误报（_run_loop 用 wait() 轮询，1 秒内退出）
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+        self._thread = None
         self._config.set("schedule.enabled", False)
 
     @property
@@ -89,12 +91,15 @@ class SchedulerManager:
         try:
             self._callback()
         except Exception:
-            pass
+            # 不静默吞掉：回调未捕获的异常打印到 stderr，便于排查
+            import traceback
+            traceback.print_exc()
 
     def _run_loop(self):
+        # 用 wait() 而非 sleep()：stop() 后能立刻响应退出
         while not self._stop_event.is_set():
             schedule.run_pending()
-            time.sleep(30)
+            self._stop_event.wait(1)
 
     # ------------------------------------------------------------------ #
     #  工具

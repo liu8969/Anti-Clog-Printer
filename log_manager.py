@@ -12,8 +12,10 @@ class LogManager:
 
     def __init__(self, log_path=None):
         if log_path is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            log_path = os.path.join(base_dir, "print_log.json")
+            # 可用环境变量 LOG_PATH 指定日志位置（如 Docker 挂载卷）
+            log_path = os.environ.get("LOG_PATH") or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "print_log.json"
+            )
         self._log_path = log_path
         self._logs = self._load()
 

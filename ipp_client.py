@@ -1,13 +1,22 @@
 """纯 Python IPP 客户端 — 无 CUPS/ipptool 依赖，跨平台可用"""
 
+import os
 import struct
 import ssl
 import urllib.request
 import urllib.error
 
 
-# 跳过打印机自签名证书验证
+# 默认跳过打印机自签名证书验证（局域网打印机普遍如此）
+# 设置环境变量 IPP_VERIFY_SSL=1 可开启标准证书校验
 _SSL_CONTEXT = ssl._create_unverified_context()
+_VERIFY_SSL = os.environ.get("IPP_VERIFY_SSL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_ssl_context():
+    if _VERIFY_SSL:
+        return ssl.create_default_context()
+    return _SSL_CONTEXT
 
 
 def _attr_str(value_tag, name, value):
@@ -60,21 +69,27 @@ def build_get_attrs_body(printer_uri):
     return b"".join(parts)
 
 
-def _ipp_request(ip, port, ipp_path, body, timeout):
+def _ipp_request(ip, port, ipp_path, body_factory, timeout):
     """
     发送 IPP 请求，先尝试 IPPS (HTTPS)，再尝试 IPP (HTTP)。
-    打印机通常使用 IPPS，自签名证书需要跳过验证。
+    body_factory(printer_uri) 用于按实际传输 scheme 构造请求体，
+    保证 printer-uri 属性与传输层一致（严格实现的打印机要求如此）。
     """
     path = ipp_path.rstrip("/")
 
     # 优先 IPPS（HTTPS），因为很多打印机强制 HTTPS
     for scheme in ("https", "http"):
+        printer_uri = (
+            f"ipps://{ip}:{port}{path}" if scheme == "https"
+            else f"ipp://{ip}:{port}{path}"
+        )
+        body = body_factory(printer_uri)
         url = f"{scheme}://{ip}:{port}{path}"
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/ipp"}, method="POST"
         )
         try:
-            ctx = _SSL_CONTEXT if scheme == "https" else None
+            ctx = _get_ssl_context() if scheme == "https" else None
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                 raw = resp.read()
                 return True, _parse_ipp_status(raw), scheme
@@ -110,10 +125,10 @@ def _parse_ipp_status(raw):
 
 def send_print_job(ip, port, ipp_path, jpeg_bytes, timeout=30):
     """发送 IPP Print-Job，返回 (success, message)"""
-    printer_uri = f"ipp://{ip}:{port}{ipp_path}"
-    body = build_print_job_body(printer_uri, jpeg_bytes)
+    def _build(printer_uri):
+        return build_print_job_body(printer_uri, jpeg_bytes)
 
-    ok, status, scheme = _ipp_request(ip, port, ipp_path, body, timeout)
+    ok, status, scheme = _ipp_request(ip, port, ipp_path, _build, timeout)
     if ok:
         return True, f"打印成功 (IPPS)" if scheme == "https" else "打印成功 (IPP)"
     else:
@@ -122,10 +137,10 @@ def send_print_job(ip, port, ipp_path, jpeg_bytes, timeout=30):
 
 def test_printer_connection(ip, port=631, ipp_path="/ipp/print", timeout=5):
     """获取打印机属性测试连接，返回 (success, message)"""
-    printer_uri = f"ipp://{ip}:{port}{ipp_path}"
-    body = build_get_attrs_body(printer_uri)
+    def _build(printer_uri):
+        return build_get_attrs_body(printer_uri)
 
-    ok, status, scheme = _ipp_request(ip, port, ipp_path, body, timeout)
+    ok, status, scheme = _ipp_request(ip, port, ipp_path, _build, timeout)
     if ok:
         label = "IPPS" if scheme == "https" else "IPP"
         return True, f"打印机连接成功 ({label})"
