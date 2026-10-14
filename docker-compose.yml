@@ -18,8 +18,15 @@ services:
       - SCHEDULE_HOUR=9
       - SCHEDULE_MINUTE=0
       - CUSTOM_TEXT=
-      # 省墨测试模式：1=只打印一条细色带（验证打印链路用，几乎不耗墨）
-      - TEST_MODE=1
+      # 打印图案：coverage=全喷嘴斜线覆盖页（推荐，防堵主力：斜线幕铺满整页高度，
+      #                   每个颜色的每一行喷孔每趟走纸都会出墨）
+      #           classic=经典彩色页 | link_test=只打一条细色带（仅验证链路，不防堵）
+      - PATTERN=coverage
+      # 覆盖强度：eco(省墨≈1.2%) / standard(标准≈2.3%，推荐) / strong(加强≈4.6%)
+      - DUTY=standard
+      # ⚠️ TEST_MODE=1 只打一条 6px 细色带（300dpi 下≈9 行喷孔，不足喷头高度的 5%），
+      #    长期开这个＝只润湿少数喷孔，正是黑色局部堵头的原因。仅排查"能不能打出来"时临时开。
+      - TEST_MODE=0
       # 测试页旋转补偿：一般无需开启（测试页已是 A4 竖向，与完整模式同方向原样打印）
       - TEST_ROTATE=0
       # 首次部署自动启用计划（配了 PRINTER_IP 即启动）；设为 0 可禁用

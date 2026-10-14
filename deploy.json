@@ -1,0 +1,6 @@
+{
+  "name": "printer-anti-clog",
+  "compose": "docker-compose.yml",
+  "ports": [18080],
+  "health": { "path": "/", "timeout_s": 120 }
+}

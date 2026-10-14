@@ -2,7 +2,9 @@
 """喷墨打印机自动防堵程序 - GUI 主入口"""
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
+import signal
+import tempfile
 import threading
 import os
 import sys
@@ -15,6 +17,55 @@ from log_manager import LogManager
 from content_generator import ContentGenerator
 from print_manager import PrintManager
 from scheduler_manager import SchedulerManager
+
+
+# ====================================================================== #
+#  单实例保护：防止启动第二个 GUI 导致计划时间到打印两份
+# ====================================================================== #
+
+PID_FILE = os.path.join(tempfile.gettempdir(), "printer_anti_clog_gui.pid")
+
+
+def _pid_alive(pid):
+    """判断 PID 是否存活"""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 存在但无权访问
+    except OSError:
+        return False
+
+
+def ensure_single_instance():
+    """单实例检查。
+
+    返回 True 表示本进程是首个实例（应继续运行）；
+    返回 False 表示已有实例在后台运行（会向它发 SIGUSR1 唤醒窗口，本进程应退出）。
+    """
+    my_pid = os.getpid()
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+        except (ValueError, OSError):
+            old_pid = 0
+        if old_pid and old_pid != my_pid and _pid_alive(old_pid):
+            # 唤醒已有实例，让它恢复被最小化的窗口
+            try:
+                os.kill(old_pid, signal.SIGUSR1)
+            except OSError:
+                pass
+            return False
+    # 写入 / 覆盖 pidfile（含清理失效残留）
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(my_pid))
+    except OSError:
+        pass
+    return True
 
 
 class App:
@@ -37,11 +88,35 @@ class App:
         self._load_ui_from_config()
 
         # 如果上次运行时计划是启用的，自动启动
+        # （启动时静默检查 IP 是否已填，不弹框打扰；缺 IP 时留状态栏提示）
         if self.config.get("schedule.enabled", False):
-            self._safe_start_scheduler()
+            if self.config.get("printer.ip", "").strip():
+                self.scheduler.start()
+            else:
+                self._set_status("计划未自动启动：请先填写打印机 IP 地址")
+
+        # 唤醒事件：再次启动本程序时，首个实例会收到 SIGUSR1，
+        # 由主循环统一处理窗口恢复（信号里不直接操作 Tk，避免重入）
+        self._wake_event = threading.Event()
+        try:
+            signal.signal(signal.SIGUSR1, self._on_wake_signal)
+        except (ValueError, OSError):
+            pass  # 非主线程/平台不支持时忽略，单实例保护仍有效
+        self.root.after(300, self._poll_wake)
 
         # 定时刷新状态
         self._update_status()
+
+    def _on_wake_signal(self, signum, frame):
+        self._wake_event.set()
+
+    def _poll_wake(self):
+        if self._wake_event.is_set():
+            self._wake_event.clear()
+            self.root.deiconify()
+            self.root.lift()
+            self._set_status("窗口已恢复")
+        self.root.after(300, self._poll_wake)
 
     # ================================================================== #
     #  UI 构建
@@ -209,21 +284,80 @@ class App:
 
         ttk.Label(tab, text="自定义备注文字（会出现在测试页上）:").pack(anchor="w")
 
-        self._text_custom = tk.Text(tab, height=4, width=60)
+        self._text_custom = tk.Text(tab, height=3, width=60)
         self._text_custom.pack(fill="x", pady=(6, 12))
 
-        self._var_test_mode = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            tab,
-            text="测试模式（省墨：说明文字 + 一条细色带，验证打印链路）",
-            variable=self._var_test_mode,
-        ).pack(anchor="w", pady=(0, 12))
+        # 打印图案
+        self._pattern_map = {
+            "全喷嘴斜线覆盖页（推荐：防堵主力，覆盖全部喷孔）": "coverage",
+            "经典彩色页（渐变色条 + 喷嘴网格，兼容旧版）": "classic",
+            "细色带自检页（只验证打印链路，不防堵）": "link_test",
+        }
+        ttk.Label(tab, text="打印图案:").pack(anchor="w")
+        self._var_pattern = tk.StringVar()
+        ttk.Combobox(tab, textvariable=self._var_pattern, state="readonly",
+                     values=list(self._pattern_map)).pack(fill="x", pady=(4, 10))
 
-        ttk.Label(
-            tab,
-            text="完整模式测试页包含: 渐变色条 / 喷嘴网格",
-            foreground="gray",
-        ).pack(anchor="w")
+        # 覆盖强度（墨量档位）
+        self._duty_map = {
+            "省墨（每孔每趟≈4点）": "eco",
+            "标准（每孔每趟≈8点，推荐）": "standard",
+            "加强（每孔每趟≈16点，已轻微堵塞时用）": "strong",
+        }
+        ttk.Label(tab, text="覆盖强度（墨量档位）:").pack(anchor="w")
+        self._var_duty = tk.StringVar()
+        ttk.Combobox(tab, textvariable=self._var_duty, state="readonly",
+                     values=list(self._duty_map)).pack(fill="x", pady=(4, 10))
+
+        self._var_k_boost = tk.BooleanVar(value=True)
+        self._var_bars = tk.BooleanVar(value=True)
+        self._var_ruler = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tab, text="黑墨加强（K 列的斜线幕与竖条加倍）",
+                        variable=self._var_k_boost).pack(anchor="w")
+        ttk.Checkbutton(tab, text="满高竖条（每个色块一条）",
+                        variable=self._var_bars).pack(anchor="w")
+        ttk.Checkbutton(tab, text="左侧毫米标尺（缺口定位用）",
+                        variable=self._var_ruler).pack(anchor="w")
+
+        self._var_content_summary = tk.StringVar(value="")
+        ttk.Label(tab, textvariable=self._var_content_summary, foreground="blue",
+                  wraplength=600, justify="left").pack(anchor="w", pady=(10, 6))
+        ttk.Button(tab, text="生成预览并另存为…（不打印）",
+                   command=self._preview_content).pack(anchor="w")
+
+        # 改图案/档位时立即刷新墨量提示
+        self._var_pattern.trace_add("write", lambda *_: self._update_content_summary())
+        self._var_duty.trace_add("write", lambda *_: self._update_content_summary())
+
+    def _update_content_summary(self):
+        """刷新"当前设置会有多少墨/覆盖多少喷孔"的提示"""
+        if not hasattr(self, "_var_content_summary"):
+            return
+        pattern = self._pattern_map.get(self._var_pattern.get(), "coverage")
+        duty = self._duty_map.get(self._var_duty.get(), "standard")
+        try:
+            text = self.content_gen.summary_line(pattern=pattern, duty=duty)
+        except Exception as e:  # 摘要失败不影响主流程
+            text = f"（摘要生成失败: {e}）"
+        self._var_content_summary.set(text)
+
+    def _preview_content(self):
+        """生成预览图并另存到用户选择的位置（不打印、不费纸）"""
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="保存防堵测试页预览", defaultextension=".jpg",
+            initialfile="打印机防堵测试页.jpg",
+            filetypes=[("JPEG 图片", "*.jpg"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        self._sync_ui_to_config()
+        try:
+            out = self.content_gen.generate(out_path=path)
+        except Exception as e:
+            messagebox.showwarning("生成预览失败", str(e))
+            return
+        self._set_status(f"预览已保存: {out}")
+        messagebox.showinfo("预览已保存", f"已生成预览图（未打印）:\n{out}")
 
     # ---------- Tab 4: 打印日志 ----------
 
@@ -362,11 +496,21 @@ class App:
 
     def _on_close(self):
         if self.scheduler.is_running:
-            # 隐藏窗口，调度器继续在后台运行
-            self.root.withdraw()
-            messagebox.showinfo(
-                "提示", "程序将在后台继续运行。\n\n可在 Dock 中点击图标重新打开窗口。"
+            # 询问：退出（停止计划）还是最小化到 Dock 继续后台运行
+            ans = messagebox.askyesno(
+                "提示",
+                "定时打印正在运行。\n\n"
+                "是 = 退出程序（停止定时打印）\n"
+                "否 = 最小化到 Dock，继续在后台运行\n\n"
+                "最小化后，点击 Dock 中的程序图标即可恢复窗口；\n"
+                "再次运行 python main.py 也会自动恢复窗口。",
             )
+            if ans:
+                self.scheduler.stop()
+                self.root.destroy()
+            else:
+                # iconify（最小化）而非 withdraw：macOS 下点击 Dock 图标可恢复窗口
+                self.root.iconify()
         else:
             self.root.destroy()
 
@@ -397,7 +541,16 @@ class App:
 
         custom_text = self._text_custom.get("1.0", "end-1c")
         self.config.set("content.custom_text", custom_text)
-        self.config.set("content.test_mode", bool(self._var_test_mode.get()))
+        pattern = self._pattern_map.get(self._var_pattern.get(), "coverage")
+        duty = self._duty_map.get(self._var_duty.get(), "standard")
+        self.config.set("content.pattern", pattern)
+        self.config.set("content.duty", duty)
+        self.config.set("content.k_boost", bool(self._var_k_boost.get()))
+        self.config.set("content.bars", bool(self._var_bars.get()))
+        self.config.set("content.ruler", bool(self._var_ruler.get()))
+        # 同步旧开关：只有细色带自检页才算 test_mode
+        self.config.set("content.test_mode", pattern == "link_test")
+        self._update_content_summary()
 
     def _load_ui_from_config(self):
         """将配置值填入 GUI 控件"""
@@ -418,7 +571,17 @@ class App:
         if custom_text:
             self._text_custom.insert("1.0", custom_text)
 
-        self._var_test_mode.set(bool(self.config.get("content.test_mode", False)))
+        pattern_rev = {v: k for k, v in self._pattern_map.items()}
+        self._var_pattern.set(pattern_rev.get(
+            self.content_gen.resolve_pattern(), list(self._pattern_map)[0]))
+        duty_rev = {v: k for k, v in self._duty_map.items()}
+        self._var_duty.set(duty_rev.get(
+            self.content_gen.resolve_duty(), list(self._duty_map)[1]))
+
+        self._var_k_boost.set(bool(self.config.get("content.k_boost", True)))
+        self._var_bars.set(bool(self.config.get("content.bars", True)))
+        self._var_ruler.set(bool(self.config.get("content.ruler", True)))
+        self._update_content_summary()
 
         self._update_uri_preview()
 
@@ -469,5 +632,17 @@ class App:
 
 
 if __name__ == "__main__":
+    if not ensure_single_instance():
+        # 已有实例在后台运行：唤醒它的窗口后退出（避免第二个调度器重复打印）
+        _tmp = tk.Tk()
+        _tmp.withdraw()
+        messagebox.showinfo(
+            "提示",
+            "程序已在后台运行。\n\n"
+            "打印计划将继续执行，本次不会打开第二个窗口。\n"
+            "（已尝试唤醒后台窗口：请在 Dock 中点击程序图标查看）",
+        )
+        _tmp.destroy()
+        sys.exit(0)
     app = App()
     app.run()
