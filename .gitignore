@@ -3,3 +3,5 @@ __pycache__/
 config.json
 print_log.json
 .DS_Store
+.qa/
+.coverage

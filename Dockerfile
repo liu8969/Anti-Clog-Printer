@@ -38,7 +38,8 @@ ENV TEST_MODE=0
 # 仅当个别打印机连 A4 竖向图也旋转时才设 1
 ENV TEST_ROTATE=0
 
-# 健康检查：Web 服务返回 200 或 401（已启用 Basic Auth）均视为健康
+# 健康检查：探 /healthz（纯 ASGI 路由，不创建 NiceGUI 页面客户端）；
+# 200 或 401（已启用 Basic Auth）均视为健康。
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \
     CMD ["python", "/app/healthcheck.py"]
 

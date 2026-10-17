@@ -3,6 +3,9 @@ services:
     build: .
     container_name: printer-anti-clog
     restart: unless-stopped
+    # 第二道护栏：健康探针曾泄漏到 8037 个线程；正常 NiceGUI/调度器只需几十个。
+    # 异常膨胀时由 cgroup 先拦住，避免再次拖垮整台 ubuntu-dev。
+    pids_limit: 512
     ports:
       - "18080:18080"
     volumes:

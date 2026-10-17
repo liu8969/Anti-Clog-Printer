@@ -49,6 +49,11 @@ class BasicAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # 健康探针不经过 Basic Auth：探针只读、无副作用，dpl/HEALTHCHECK 需要稳定 200。
+        if scope.get("path") == "/healthz":
+            await self.app(scope, receive, send)
+            return
+
         auth = b""
         for k, v in scope.get("headers") or []:
             if k == b"authorization":
@@ -424,6 +429,13 @@ refresh_log()
 # ====================================================================== #
 #  启动
 # ====================================================================== #
+
+# 轻量健康探针：不要走 "/" —— NiceGUI 首页会为每个 HTTP 客户端创建页面/timer，
+# Docker HEALTHCHECK 每 30s 探一次会在几天内累积数千线程（2026-10 的 8037 线程事故）。
+@nicegui_app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
 
 # 设置 WEB_PASSWORD 后启用 Basic Auth 保护管理界面
 if WEB_PASSWORD:
